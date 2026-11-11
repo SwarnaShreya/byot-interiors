@@ -226,6 +226,14 @@ class Store:
         return revision+1
 
 
+    def delete(self, project_id, revision):
+        with self.connection() as conn:
+            result = conn.execute(self.sql('DELETE FROM byot_projects WHERE id=? AND revision=?'),
+                                  (project_id, revision))
+            if result.rowcount != 1:
+                raise ConflictError('This client changed or was deleted in another window. Reload the saved client before continuing.')
+
+
 # -----------------------------------------------------------------
 # excel_export.py
 from io import BytesIO
@@ -539,6 +547,8 @@ variants = [{'name': 'Site revised', 'rows': [{'Section': 'Parents Bedroom', 'De
 
 if page == 'Clients':
     st.header('Clients & projects')
+    if st.session_state.get('deleted_client_notice'):
+        st.success(st.session_state.pop('deleted_client_notice'))
     st.write('Select a client in the sidebar to reopen their saved records.')
     with st.expander('Add a client', expanded=not bool(clients)):
         with st.form('new_client'):
@@ -580,6 +590,31 @@ if page == 'Clients':
                     st.success('Client details saved.')
                 except Exception:
                     st.error('Client details were not saved. Reload if another window changed them.')
+        with st.expander('Delete selected client'):
+            selected_project = current()
+            client_id = selected_project['id']
+            st.warning(f"Permanently delete {selected_project['name']} and all of this client’s quotations, costs, materials and payment records. Other clients are unchanged.")
+            st.download_button('Download this client’s backup before deleting',
+                               json.dumps(selected_project, indent=2),
+                               f'BYOT_client_{client_id}_backup.json', 'application/json',
+                               key=f'delete_backup_{client_id}', on_click='ignore')
+            st.caption('You can restore a downloaded backup from the sidebar. Unsaved form changes are not included.')
+            confirmation = st.text_input('Type DELETE to confirm', key=f'delete_confirm_{client_id}')
+            if st.button('Permanently delete this client', key=f'delete_client_{client_id}',
+                         disabled=confirmation != 'DELETE'):
+                try:
+                    store.delete(client_id, st.session_state['revision'])
+                except ConflictError as error:
+                    st.error(str(error))
+                except Exception:
+                    st.error('Client was not deleted. Check the database connection.')
+                else:
+                    for state_key in list(st.session_state):
+                        if state_key in ('project', 'revision', 'loaded_id', 'pending_client', 'unsaved', 'save_error', 'saved_at') or state_key.startswith(f'edit_{client_id}_') or state_key.startswith('delete_'):
+                            st.session_state.pop(state_key, None)
+                    clear_editors()
+                    st.session_state['deleted_client_notice'] = 'Client deleted. Other client records are unchanged.'
+                    st.rerun()
         st.divider()
         st.subheader('Start from the supplied quotation')
         st.caption('The workbook contains different revisions. Choose one; they will not be combined. Existing costs are not inferred from quote prices.')
